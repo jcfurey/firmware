@@ -2,6 +2,7 @@
 
 #include "PhoneAPI.h"
 #include "concurrency/OSThread.h"
+#include "mesh/http/HttpServerTiming.h"
 #include <Arduino.h>
 #include <functional>
 
@@ -13,11 +14,11 @@ void createSSLCert();
 class WebServerThread : private concurrency::OSThread
 {
   private:
-    uint32_t lastActivityTime = 0;
+    HttpServerTiming timing;
 
   public:
     WebServerThread();
-    uint32_t requestRestart = 0;
+    void scheduleRestart();
     void markActivity();
 
   protected:
@@ -36,7 +37,7 @@ class WebServerThread
 {
   public:
     WebServerThread() {}
-    uint32_t requestRestart = 0;
+    void scheduleRestart() {}
     void markActivity() {}
 };
 

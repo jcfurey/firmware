@@ -33,6 +33,17 @@ env:
   LCOV_CAPTURE_FLAGS: --quiet --capture --include "${PWD}/src/*" --exclude '*/src/mesh/generated/*' --base-directory "${PWD}"
 
 jobs:
+  device-update-check:
+    name: ESP32 Update Script
+    runs-on: ubuntu-slim
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - run: ./bin/test-device-update.sh
+
   # Tripwire against the native suite set shrinking by accident. `platformio test` discovers and
   # runs whatever test_* directories exist, and bin/run-tests.sh derives its expected count from
   # the same walk - so a suite directory lost in a bad rebase or an overzealous cleanup just means
