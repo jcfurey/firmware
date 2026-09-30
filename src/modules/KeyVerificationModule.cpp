@@ -137,6 +137,7 @@ bool KeyVerificationModule::handleReceivedProtobuf(const meshtastic_MeshPacket &
                 snprintf(cn->message, sizeof(cn->message), "Final confirmation for incoming manual key verification %s", message);
                 cn->which_payload_variant = meshtastic_ClientNotification_key_verification_final_tag;
                 cn->payload_variant.key_verification_final.nonce = currentNonce;
+                generateVerificationCode(cn->payload_variant.key_verification_final.verification_characters);
                 copyNodeLongNameOrUnknown(cn->payload_variant.key_verification_final.remote_longname,
                                           sizeof(cn->payload_variant.key_verification_final.remote_longname),
                                           nodeDB->getMeshNode(currentRemoteNode));
@@ -363,6 +364,10 @@ void KeyVerificationModule::processSecurityNumber(uint32_t incomingNumber)
     p->priority = meshtastic_MeshPacket_Priority_HIGH;
     service->sendToMesh(p, RX_SRC_LOCAL, true);
     currentState = KEY_VERIFICATION_SENDER_AWAITING_USER;
+    // Nothing else on the sender path writes `message`; without this the phone gets a stale or empty code.
+    memset(message, 0, sizeof(message));
+    snprintf(message, sizeof(message), "Verification: \n");
+    generateVerificationCode(message + 15);
     IF_SCREEN(screen->requestMenu(graphics::menuHandler::KeyVerificationFinalPrompt);)
     meshtastic_ClientNotification *cn = clientNotificationPool.allocZeroed();
     if (cn) {
@@ -370,13 +375,14 @@ void KeyVerificationModule::processSecurityNumber(uint32_t incomingNumber)
         snprintf(cn->message, sizeof(cn->message), "Final confirmation for outgoing manual key verification %s", message);
         cn->which_payload_variant = meshtastic_ClientNotification_key_verification_final_tag;
         cn->payload_variant.key_verification_final.nonce = currentNonce;
+        generateVerificationCode(cn->payload_variant.key_verification_final.verification_characters);
         copyNodeLongNameOrUnknown(cn->payload_variant.key_verification_final.remote_longname,
                                   sizeof(cn->payload_variant.key_verification_final.remote_longname),
                                   nodeDB->getMeshNode(currentRemoteNode));
         cn->payload_variant.key_verification_final.isSender = true;
         service->sendClientNotification(cn);
     }
-    LOG_INFO(message);
+    LOG_INFO("%s", message);
 
     return;
 }

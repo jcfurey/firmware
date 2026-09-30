@@ -31,17 +31,16 @@ bool NodeInfoModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, mes
 
     auto p = *pptr;
 
-    // Suppress replies to senders we've replied to recently (12H window)
+    // Suppress replies to senders we've replied to recently (12H window). allocReply() stamps the
+    // window, and only when it builds a reply: a request we merely overheard got nothing from us.
     if (mp.decoded.want_response && !isFromUs(&mp)) {
-        const NodeNum sender = getFrom(&mp);
         // A local dedup window, not a wall-clock reading - uptime avoids RTC jumps and replayed
         // packets' stale rx_time perturbing it. Seconds, not millis - this is a wide window.
         const uint32_t nowSecs = Time::getUptimeSecs();
-        auto it = lastNodeInfoSeen.find(sender);
+        auto it = lastNodeInfoSeen.find(getFrom(&mp));
         if (it != lastNodeInfoSeen.end() && (uint32_t)(nowSecs - it->second) < NodeInfoReplySuppressSeconds) {
             suppressReplyForCurrentRequest = true;
         }
-        lastNodeInfoSeen[sender] = nowSecs;
         pruneLastNodeInfoCache();
     }
 
@@ -208,6 +207,8 @@ meshtastic_MeshPacket *NodeInfoModule::allocReply()
         // the next one, and the floor it would sit out is 30 minutes.
         if (transmitHistory && !deferHistoryStamp)
             transmitHistory->setLastSentToMesh(meshtastic_PortNum_NODEINFO_APP);
+        if (isReplyingToExternalRequest)
+            lastNodeInfoSeen[getFrom(currentRequest)] = Time::getUptimeSecs();
         return allocDataProtobuf(u);
     }
 }

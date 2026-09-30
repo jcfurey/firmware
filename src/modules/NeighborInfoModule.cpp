@@ -35,6 +35,12 @@ void NeighborInfoModule::printNodeDBNeighbors()
     }
 }
 
+// The interval runOnce() really sends at. Peers expire us at twice what we advertise, so the two must agree.
+static uint32_t effectiveUpdateIntervalSecs()
+{
+    return Default::getConfiguredOrDefault(moduleConfig.neighbor_info.update_interval, default_neighbor_info_broadcast_secs);
+}
+
 /* Send our initial owner announcement 35 seconds after we start (to give
  * network time to setup) */
 NeighborInfoModule::NeighborInfoModule()
@@ -64,8 +70,7 @@ uint32_t NeighborInfoModule::collectNeighborInfo(meshtastic_NeighborInfo *neighb
     NodeNum my_node_id = nodeDB->getNodeNum();
     neighborInfo->node_id = my_node_id;
     neighborInfo->last_sent_by_id = my_node_id;
-    neighborInfo->node_broadcast_interval_secs =
-        Default::getConfiguredOrDefault(moduleConfig.neighbor_info.update_interval, default_telemetry_broadcast_interval_secs);
+    neighborInfo->node_broadcast_interval_secs = effectiveUpdateIntervalSecs();
 
     cleanUpNeighbors();
 
@@ -243,7 +248,7 @@ meshtastic_Neighbor *NeighborInfoModule::getOrCreateNeighbor(NodeNum originalSen
         new_nbr.node_broadcast_interval_secs = node_broadcast_interval_secs;
     else // Assume the same broadcast interval as us for the neighbor if we don't
          // know it
-        new_nbr.node_broadcast_interval_secs = moduleConfig.neighbor_info.update_interval;
+        new_nbr.node_broadcast_interval_secs = effectiveUpdateIntervalSecs();
 
     if (neighbors.size() < MAX_NUM_NEIGHBORS) {
         neighbors.push_back(new_nbr);

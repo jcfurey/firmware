@@ -69,6 +69,8 @@ bool NextHopRouter::relayOpaquePacket(const meshtastic_MeshPacket *p)
     capEventRelayHops(relay);
 #endif
     relay->relay_node = nodeDB->getLastByteOfNodeNum(getNodeNum());
+    // The copy still names us as next hop; left in place, every node past us drops it. Flood onward.
+    relay->next_hop = NO_NEXT_HOP_PREFERENCE;
     // The interface declines some packets (NODENUM_BROADCAST_NO_LORA) with ERRNO_SHOULD_RELEASE,
     // which leaves the copy ours to free. Dropping it here would leak a pool slot per opaque frame.
     ErrorCode res = Router::send(relay);
@@ -461,24 +463,26 @@ int32_t NextHopRouter::doRetransmissions()
 
     // FIXME, we should use a better datastructure rather than walking through this map.
     // for(auto el: pending) {
-    for (auto it = pending.begin(), nextIt = it; it != pending.end(); it = nextIt) {
-        ++nextIt; // we use this odd pattern because we might be deleting it...
+    for (auto it = pending.begin(); it != pending.end();) {
+        // A local NAK is delivered synchronously, and its sniffReceived() erases this entry and frees its
+        // packet. So hold the key, not the iterator, across any send, and re-find the entry afterwards.
+        const GlobalPacketId key = it->first;
         auto &p = it->second;
-
-        bool stillValid = true; // assume we'll keep this record around
 
         // Judged against the snapshot above, so one pass sees one instant and the 49.7 day wrap
         // can't stall retransmission.
         if (Throttle::deadlinePassedAt(now, p.nextTxMsec)) {
             if (p.numRetransmissions == 0) {
-                if (isFromUs(p.packet)) {
+                const bool sendNak = isFromUs(p.packet);
+                const NodeNum nakTo = getFrom(p.packet);
+                const PacketId nakId = p.packet->id;
+                const ChannelIndex nakChannel = p.packet->channel;
+                if (sendNak)
                     LOG_DEBUG("Reliable send failed, return nak fr=0x%08x,to=0x%08x,id=0x%08x", p.packet->from, p.packet->to,
                               p.packet->id);
-                    sendAckNak(meshtastic_Routing_Error_MAX_RETRANSMIT, getFrom(p.packet), p.packet->id, p.packet->channel);
-                }
-                // Note: we don't stop retransmission here, instead the Nak packet gets processed in sniffReceived
-                stopRetransmission(it->first);
-                stillValid = false; // just deleted it
+                stopRetransmission(key);
+                if (sendNak)
+                    sendAckNak(meshtastic_Routing_Error_MAX_RETRANSMIT, nakTo, nakId, nakChannel);
             } else {
                 LOG_DEBUG("Send retransmission fr=0x%08x,to=0x%08x,id=0x%08x, tries left=%d", p.packet->from, p.packet->to,
                           p.packet->id, p.numRetransmissions);
@@ -544,18 +548,22 @@ int32_t NextHopRouter::doRetransmissions()
                     }
                 }
 
-                // Queue again
-                --p.numRetransmissions;
-                setNextTx(&p);
+                // Queue again, unless the send's own NAK (e.g. a duty-cycle abort) already dropped it
+                auto cur = pending.find(key);
+                if (cur != pending.end()) {
+                    --cur->second.numRetransmissions;
+                    setNextTx(&cur->second);
+                    d = min((int32_t)(cur->second.nextTxMsec - now), d);
+                }
             }
+            it = pending.upper_bound(key);
+            continue;
         }
 
-        if (stillValid) {
-            // Update our desired sleep delay
-            int32_t t = p.nextTxMsec - now;
-
-            d = min(t, d);
-        }
+        // Update our desired sleep delay
+        int32_t t = p.nextTxMsec - now;
+        d = min(t, d);
+        ++it;
     }
 
     return d;

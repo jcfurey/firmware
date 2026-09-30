@@ -576,8 +576,16 @@ time_t gm_mktime(const struct tm *tm)
 #if !MESHTASTIC_EXCLUDE_TZ
     time_t result = 0;
 
-    // First, get us to the start of tm->year, by calculating the number of days since the Unix epoch.
+    // Fold an out-of-range month into the year, as mktime() does; GPS/RTC reads with no valid date give month -1.
     int year = 1900 + tm->tm_year; // tm_year is years since 1900
+    int mon = tm->tm_mon % 12;
+    year += tm->tm_mon / 12;
+    if (mon < 0) {
+        mon += 12;
+        year--;
+    }
+
+    // First, get us to the start of the year, by calculating the number of days since the Unix epoch.
     int year_minus_one = year - 1;
     int days_before_this_year = 0;
     days_before_this_year += year_minus_one * 365;
@@ -588,10 +596,10 @@ time_t gm_mktime(const struct tm *tm)
 
     // Now, within this tm->year, compute the days *before* this tm->month starts.
     static const int days_before_month[12] = {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334}; // non-leap year
-    int days_this_year_before_this_month = days_before_month[tm->tm_mon];                             // tm->tm_mon is 0..11
+    int days_this_year_before_this_month = days_before_month[mon];
 
     // If this is a leap year, and we're past February, add a day:
-    if (tm->tm_mon >= 2 && (year % 4) == 0 && ((year % 100) != 0 || (year % 400) == 0)) {
+    if (mon >= 2 && (year % 4) == 0 && ((year % 100) != 0 || (year % 400) == 0)) {
         days_this_year_before_this_month += 1;
     }
 

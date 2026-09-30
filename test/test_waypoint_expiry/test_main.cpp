@@ -1,8 +1,10 @@
 // Unit tests for waypointIsActive() and its caller WaypointStore::isExpired(): the expire == 0 and
-// expire == 1 sentinels, ordinary expiry, and an untrusted clock.
+// expire == 1 sentinels, ordinary expiry, and an untrusted clock. Also WaypointStore::addFromPacket()'s
+// locked_to enforcement on updates.
 #include "TestUtil.h"
 #include "WaypointStore.h"
 #include "meshUtils.h"
+#include <cstring>
 #include <pb_encode.h>
 #include <unity.h>
 
@@ -94,6 +96,49 @@ void test_packet_without_rx_time_still_expires()
     waypointStore.clearAllWaypoints();
 }
 
+static meshtastic_MeshPacket makeWaypointPacket(uint32_t from, const meshtastic_Waypoint &wp)
+{
+    meshtastic_MeshPacket packet = meshtastic_MeshPacket_init_zero;
+    packet.from = from;
+    packet.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+    packet.decoded.payload.size = (uint16_t)pb_encode_to_bytes(packet.decoded.payload.bytes, sizeof(packet.decoded.payload.bytes),
+                                                               &meshtastic_Waypoint_msg, &wp);
+    return packet;
+}
+
+// WaypointStore::addFromPacket() in src/WaypointStore.cpp enforced locked_to only for deletes. In
+// mesh.proto a nonzero locked_to means only that node may update the waypoint, but an edit from any
+// other sender replaced the stored copy - and could clear locked_to, after which its delete was
+// honoured too. A foreign edit of a locked waypoint must be refused and leave the stored copy as it
+// was; the lock holder's own edit must still apply.
+void test_locked_waypoint_rejects_foreign_update()
+{
+    constexpr uint32_t LOCK_HOLDER = 0x11223344;
+    constexpr uint32_t OTHER = 0x55667788;
+    meshtastic_Waypoint wp = meshtastic_Waypoint_init_zero;
+    wp.id = 4343;
+    wp.locked_to = LOCK_HOLDER;
+    strncpy(wp.name, "Camp", sizeof(wp.name) - 1);
+
+    waypointStore.clearAllWaypoints();
+    TEST_ASSERT_TRUE(waypointStore.addFromPacket(makeWaypointPacket(LOCK_HOLDER, wp), false));
+
+    meshtastic_Waypoint forged = wp;
+    forged.locked_to = 0;
+    strncpy(forged.name, "Moved", sizeof(forged.name) - 1);
+    TEST_ASSERT_FALSE(waypointStore.addFromPacket(makeWaypointPacket(OTHER, forged), false));
+    const StoredWaypoint *kept = waypointStore.findWaypoint(wp.id);
+    TEST_ASSERT_NOT_NULL(kept);
+    TEST_ASSERT_EQUAL_STRING("Camp", kept->waypoint.name);
+    TEST_ASSERT_EQUAL_HEX32(LOCK_HOLDER, kept->waypoint.locked_to);
+
+    meshtastic_Waypoint edit = wp;
+    strncpy(edit.name, "Camp 2", sizeof(edit.name) - 1);
+    TEST_ASSERT_TRUE(waypointStore.addFromPacket(makeWaypointPacket(LOCK_HOLDER, edit), false));
+    TEST_ASSERT_EQUAL_STRING("Camp 2", waypointStore.findWaypoint(wp.id)->waypoint.name);
+    waypointStore.clearAllWaypoints();
+}
+
 void setup()
 {
     initializeTestEnvironment();
@@ -108,6 +153,7 @@ void setup()
     RUN_TEST(test_untrusted_clock_still_honours_delete);
     RUN_TEST(test_store_expiry_matches_the_predicate);
     RUN_TEST(test_packet_without_rx_time_still_expires);
+    RUN_TEST(test_locked_waypoint_rejects_foreign_update);
     exit(UNITY_END());
 }
 

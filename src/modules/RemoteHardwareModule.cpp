@@ -69,9 +69,14 @@ RemoteHardwareModule::RemoteHardwareModule()
     // restrict to the gpio channel for rx
     boundChannel = Channels::gpioChannel;
 
-    // Pull available pin allowlist from config and build a bitmask out of it for fast comparisons later
-    for (uint8_t i = 0; i < 4; i++) {
-        availablePins += 1ULL << moduleConfig.remote_hardware.available_pins[i].gpio_pin;
+    // Pull available pin allowlist from config and build a bitmask out of it for fast comparisons later.
+    // Only configured slots count: an unused slot reads as pin 0 and would otherwise open GPIO0.
+    const size_t slots =
+        sizeof(moduleConfig.remote_hardware.available_pins) / sizeof(moduleConfig.remote_hardware.available_pins[0]);
+    for (size_t i = 0; i < moduleConfig.remote_hardware.available_pins_count && i < slots; i++) {
+        const uint32_t pin = moduleConfig.remote_hardware.available_pins[i].gpio_pin;
+        if (pin < NUM_GPIOS)
+            availablePins |= 1ULL << pin;
     }
 }
 

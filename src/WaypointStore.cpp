@@ -219,6 +219,10 @@ bool WaypointStore::addFromPacket(const meshtastic_MeshPacket &packet, bool loca
         return true;
     }
 
+    // The lock covers edits too: an update from anyone but the lock holder is dropped (not stored, not announced).
+    if (existing && existing->waypoint.locked_to != 0 && existing->waypoint.locked_to != entry.creatorNodeNum)
+        return false;
+
     addStoredWaypoint(entry);
 
 #if ENABLE_WAYPOINT_PERSISTENCE

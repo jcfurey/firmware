@@ -268,11 +268,12 @@ void StreamAPI::emitLogRecord(meshtastic_LogRecord_Level level, const char *src,
     fromRadioScratchLog.log_record.time = rtc_sec;
     strncpy(fromRadioScratchLog.log_record.source, src, sizeof(fromRadioScratchLog.log_record.source) - 1);
 
-    auto num_printed =
-        vsnprintf(fromRadioScratchLog.log_record.message, sizeof(fromRadioScratchLog.log_record.message) - 1, format, arg);
-    if (num_printed > 0 && fromRadioScratchLog.log_record.message[num_printed - 1] ==
-                               '\n') // Strip any ending newline, because we have records for framing instead.
-        fromRadioScratchLog.log_record.message[num_printed - 1] = '\0';
+    char *message = fromRadioScratchLog.log_record.message;
+    vsnprintf(message, sizeof(fromRadioScratchLog.log_record.message) - 1, format, arg);
+    // vsnprintf returns the untruncated length, so measure what landed in the buffer instead.
+    const size_t msgLen = strnlen(message, sizeof(fromRadioScratchLog.log_record.message));
+    if (msgLen > 0 && message[msgLen - 1] == '\n') // Strip any ending newline, because we have records for framing instead.
+        message[msgLen - 1] = '\0';
 
     size_t len =
         pb_encode_to_bytes(txBufLog + HEADER_LEN, meshtastic_FromRadio_size, &meshtastic_FromRadio_msg, &fromRadioScratchLog);

@@ -421,6 +421,31 @@ static void test_gm_mktime_leap_rule_sweep(void)
     }
 }
 
+// gm_mktime indexed days_before_month[] with tm_mon unchecked. The GPS position timestamp in
+// src/gps/GPS.cpp builds tm_mon as reader.date.month() - 1, which is -1 while the receiver has no
+// valid date, and an RV3028 read can hand back any register value - both read outside the table. An out-of-range month must fold
+// into the year the way mktime() normalises it: month -1 is December of the year before, 12 is
+// January of the year after.
+static void test_gm_mktime_folds_out_of_range_month(void)
+{
+    struct tm dec = {}, before = {}, jan = {}, after = {};
+    dec.tm_year = 2023 - 1900;
+    dec.tm_mon = 11;
+    dec.tm_mday = 15;
+    before.tm_year = 2024 - 1900;
+    before.tm_mon = -1;
+    before.tm_mday = 15;
+    TEST_ASSERT_EQUAL_INT64((int64_t)gm_mktime(&dec), (int64_t)gm_mktime(&before));
+
+    jan.tm_year = 2025 - 1900;
+    jan.tm_mon = 0;
+    jan.tm_mday = 15;
+    after.tm_year = 2024 - 1900;
+    after.tm_mon = 12;
+    after.tm_mday = 15;
+    TEST_ASSERT_EQUAL_INT64((int64_t)gm_mktime(&jan), (int64_t)gm_mktime(&after));
+}
+
 void setup()
 {
     delay(10);
@@ -449,6 +474,7 @@ void setup()
     printf("\n=== gm_mktime known answers ===\n");
     RUN_TEST(test_gm_mktime_known_epochs);
     RUN_TEST(test_gm_mktime_leap_rule_sweep);
+    RUN_TEST(test_gm_mktime_folds_out_of_range_month);
 
     exit(UNITY_END());
 }

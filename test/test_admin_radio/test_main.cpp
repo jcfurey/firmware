@@ -1342,6 +1342,37 @@ static void test_restorePreferences_sanitizesLicensedBackupBeforeReturn()
     nodeDB = savedNodeDB;
 }
 
+// NodeDB::restorePreferences() in src/mesh/NodeDB.cpp used to assign loadProto()'s LoadFileResult to
+// a bool. Every enumerator is nonzero, so DECODE_FAILED read as success: the struct loadProto had
+// already zeroed was applied and saved, blanking the owner and (with SEGMENT_CONFIG) wiping the
+// region and the private key, which changes the node number. A backup that does not decode must be
+// refused and must leave the running state as it was.
+static void test_restorePreferences_rejectsUndecodableBackup()
+{
+    NodeDB *savedNodeDB = nodeDB;
+    nodeDB = new NodeDB();
+    const meshtastic_DeviceState savedDeviceState = devicestate;
+
+    TEST_ASSERT_TRUE(nodeDB->backupPreferences(meshtastic_AdminMessage_BackupLocation_FLASH));
+    {
+        // Field 1, length-delimited, claims 127 bytes and supplies none: nanopb fails the decode.
+        const uint8_t truncated[] = {0x0A, 0x7F};
+        auto f = FSCom.open(backupFileName, FILE_O_WRITE);
+        TEST_ASSERT_TRUE((bool)f);
+        TEST_ASSERT_EQUAL(sizeof(truncated), f.write(truncated, sizeof(truncated)));
+        f.close();
+    }
+
+    strncpy(owner.long_name, "Keep Me", sizeof(owner.long_name) - 1);
+    TEST_ASSERT_FALSE(nodeDB->restorePreferences(meshtastic_AdminMessage_BackupLocation_FLASH, SEGMENT_DEVICESTATE));
+    TEST_ASSERT_EQUAL_STRING("Keep Me", owner.long_name);
+
+    devicestate = savedDeviceState;
+    FSCom.remove(backupFileName);
+    delete nodeDB;
+    nodeDB = savedNodeDB;
+}
+
 static meshtastic_Config makeLoraSetConfig(meshtastic_Config_LoRaConfig_RegionCode region, bool usePreset,
                                            meshtastic_Config_LoRaConfig_ModemPreset preset)
 {
@@ -2364,6 +2395,28 @@ static void test_toggleMutedNode_skipsRadioReload_butPersists()
     TEST_ASSERT_TRUE(nodeInfoLiteIsMuted(nodeDB->getMeshNode(TEST_NODE_NUM)));
 }
 
+// AdminModule's remove_by_nodenum and set_ignored_node used to act on our own node number. Self is
+// pinned at index 0 and refreshLocalMeshNode()/trySendPosition() assert it exists, so removing it
+// aborted the next phone sync; ignoring it set a protected flag on ourselves. Both must be refused.
+static void test_nodeAdmin_refusesOwnNodeNum()
+{
+    const NodeNum self = nodeDB->getNodeNum();
+    nodeDB->getOrCreateMeshNode(self);
+    TEST_ASSERT_NOT_NULL(nodeDB->getMeshNode(self));
+
+    meshtastic_AdminMessage m = meshtastic_AdminMessage_init_zero;
+    m.which_payload_variant = meshtastic_AdminMessage_set_ignored_node_tag;
+    m.set_ignored_node = self;
+    sendAdmin(m);
+    TEST_ASSERT_FALSE(nodeInfoLiteIsIgnored(nodeDB->getMeshNode(self)));
+
+    m = meshtastic_AdminMessage_init_zero;
+    m.which_payload_variant = meshtastic_AdminMessage_remove_by_nodenum_tag;
+    m.remove_by_nodenum = self;
+    sendAdmin(m);
+    TEST_ASSERT_NOT_NULL(nodeDB->getMeshNode(self));
+}
+
 // -----------------------------------------------------------------------
 // Node menu mute toggle (graphics::menuHandler::toggleNodeMuted)
 // -----------------------------------------------------------------------
@@ -2552,6 +2605,7 @@ void setup()
     RUN_TEST(test_handleSetConfig_persistsUnlicensedFirstRegionIdentity);
     RUN_TEST(test_bootDefense_sanitizesStaleLicensedChannelsOnce);
     RUN_TEST(test_restorePreferences_sanitizesLicensedBackupBeforeReturn);
+    RUN_TEST(test_restorePreferences_rejectsUndecodableBackup);
     RUN_TEST(test_getRegion_returnsCorrectRegion_US);
     RUN_TEST(test_getRegion_returnsCorrectRegion_EU868);
     RUN_TEST(test_getRegion_returnsCorrectRegion_LORA24);
@@ -2670,6 +2724,7 @@ void setup()
     RUN_TEST(test_setFavoriteNode_skipsRadioReload_butPersists);
     RUN_TEST(test_setIgnoredNode_skipsRadioReload_butPersists);
     RUN_TEST(test_toggleMutedNode_skipsRadioReload_butPersists);
+    RUN_TEST(test_nodeAdmin_refusesOwnNodeNum);
 
 #if HAS_SCREEN
     // Node menu mute toggle

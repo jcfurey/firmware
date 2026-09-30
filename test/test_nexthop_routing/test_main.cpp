@@ -22,6 +22,7 @@
 #include "modules/RoutingModule.h"
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <list>
 #include <memory>
 #include <tuple>
@@ -205,6 +206,8 @@ class CaptureRadioInterface : public RadioInterface
     ErrorCode send(meshtastic_MeshPacket *p) override
     {
         sentPackets.push_back(*p);
+        if (onSend)
+            onSend(*p);
         packetPool.release(p);
         return ERRNO_OK;
     }
@@ -235,10 +238,13 @@ class CaptureRadioInterface : public RadioInterface
     {
         sentPackets.clear();
         cancelCount = 0;
+        onSend = nullptr;
     }
 
     std::vector<meshtastic_MeshPacket> sentPackets;
     uint32_t cancelCount = 0;
+    // Runs inside send(), standing in for work the firmware does synchronously on the send path.
+    std::function<void(const meshtastic_MeshPacket &)> onSend;
 };
 
 class ReliableRouterTestShim : public ReliableRouter
@@ -263,6 +269,7 @@ class ReliableRouterTestShim : public ReliableRouter
     }
 
     int32_t runDueRetries() { return doRetransmissions(); }
+    bool stopForTest(NodeNum from, PacketId id) { return stopRetransmission(from, id); }
     void sniffForTest(const meshtastic_MeshPacket *p, const meshtastic_Routing *routing)
     {
         ReliableRouter::sniffReceived(p, routing);
@@ -285,9 +292,14 @@ class MockRoutingModule : public RoutingModule
     {
         (void)relaySource;
         ackNaks.emplace_back(err, to, idFrom, chIndex, hopLimit, ackWantsAck);
+        if (onAckNak)
+            onAckNak(to, idFrom);
     }
 
     std::list<std::tuple<meshtastic_Routing_Error, NodeNum, PacketId, ChannelIndex, uint8_t, bool>> ackNaks;
+    // The real RoutingModule delivers a NAK addressed to us synchronously (Router::sendLocal ->
+    // deliverLocal), and ReliableRouter::sniffReceived() then stops the matching retransmission.
+    std::function<void(NodeNum, PacketId)> onAckNak;
 };
 
 class ScopedAirTimeFixture
@@ -426,6 +438,7 @@ void setUp(void)
         nextHopRadio->reset();
     reliableRadio->reset();
     mockRoutingModule->ackNaks.clear();
+    mockRoutingModule->onAckNak = nullptr;
     configureBehaviorChannels();
 }
 
@@ -978,6 +991,48 @@ void test_early_flood_preserves_fresh_verified_route(void)
     TEST_ASSERT_TRUE(shim->stopForTest(p.from, p.id));
 }
 
+// doRetransmissions() must not touch a pending entry after the MAX_RETRANSMIT NAK has gone out. In
+// the firmware that NAK is addressed to us, delivered synchronously, and its sniffReceived() stops
+// the same retransmission - erasing the map node and freeing its packet while the loop still held
+// the iterator. The loop then called stopRetransmission(it->first) on the freed node (an ASan
+// heap-use-after-free on every reliable send that ran out of retries). The hook replays that erase.
+void test_max_retransmit_nak_that_stops_entry_is_safe(void)
+{
+    meshtastic_MeshPacket p = makeRebroadcastCandidate(kRemoteNode);
+    p.from = kLocalNode;
+    p.id = 0x51000020;
+    reliableShim->seedRetry(p, /*attempts=*/1); // no retries left, so the next due pass NAKs
+    mockRoutingModule->onAckNak = [](NodeNum to, PacketId id) { reliableShim->stopForTest(to, id); };
+    reliableShim->makeRetryDue(kLocalNode, p.id);
+
+    reliableShim->runDueRetries();
+
+    TEST_ASSERT_EQUAL_UINT32(0, reliableShim->pendingCount());
+    TEST_ASSERT_EQUAL_UINT32(1, mockRoutingModule->ackNaks.size());
+    TEST_ASSERT_EQUAL_INT(meshtastic_Routing_Error_MAX_RETRANSMIT, std::get<0>(mockRoutingModule->ackNaks.front()));
+    TEST_ASSERT_EQUAL_HEX32(kLocalNode, std::get<1>(mockRoutingModule->ackNaks.front()));
+    TEST_ASSERT_EQUAL_HEX32(p.id, std::get<2>(mockRoutingModule->ackNaks.front()));
+}
+
+// The same hazard on the retry branch: when a retry copy of our own packet hits the duty-cycle limit,
+// Router::send() NAKs it synchronously and that NAK stops the retransmission mid-send. The loop then
+// decremented numRetransmissions and re-armed the timer on the erased node (a use-after-free write).
+// A retry whose send erases its own entry must leave nothing pending and must not re-arm anything.
+void test_retry_whose_send_stops_entry_is_safe(void)
+{
+    meshtastic_MeshPacket p = makeRebroadcastCandidate(NODENUM_BROADCAST);
+    p.from = kLocalNode;
+    p.id = 0x51000021;
+    reliableShim->seedRetry(p, /*attempts=*/3);
+    reliableRadio->onSend = [](const meshtastic_MeshPacket &sent) { reliableShim->stopForTest(sent.from, sent.id); };
+    reliableShim->makeRetryDue(kLocalNode, p.id);
+
+    reliableShim->runDueRetries();
+
+    TEST_ASSERT_EQUAL_UINT32(1, reliableRadio->sentPackets.size());
+    TEST_ASSERT_EQUAL_UINT32(0, reliableShim->pendingCount());
+}
+
 // Control: proves the NO_LORA case below turns on the `to` field alone.
 void test_rebroadcast_normal_broadcast_is_relayed(void)
 {
@@ -1005,6 +1060,22 @@ void test_rebroadcast_declined_send_releases_packet(void)
 
     TEST_ASSERT_TRUE_MESSAGE(shim->perhapsRebroadcast(&p), "the rebroadcast must still be attempted");
     TEST_ASSERT_EQUAL_MESSAGE(1, mockIface->sendCount, "the copy must have reached the mock radio");
+}
+
+// A relay cannot decrypt a PKI DM between two other nodes, so relayOpaquePacket() forwards it from the
+// outer header. When the sender addressed the DM to us as next hop, the forwarded copy used to keep
+// next_hop == our byte; every node past us then saw a next_hop that was not its own and dropped it,
+// and the sender had already stopped retrying on hearing our relay. The copy must go out unpinned.
+void test_opaque_relay_clears_our_next_hop(void)
+{
+    MockRadioInterface *mockIface = installMockIface();
+    meshtastic_MeshPacket p = makeRebroadcastCandidate(0x33333333);
+    p.id = 0x51000030;
+    p.next_hop = mockNodeDB->getLastByteOfNodeNum(kLocalNode);
+
+    TEST_ASSERT_TRUE(shim->relayOpaquePacket(&p));
+    TEST_ASSERT_EQUAL_UINT32(1, mockIface->sentNextHops.size());
+    TEST_ASSERT_EQUAL_HEX8(NO_NEXT_HOP_PREFERENCE, mockIface->sentNextHops[0]);
 }
 
 // An already-encrypted packet never reaches perhapsEncode's TOO_LARGE check, so Router::send() is the
@@ -1150,11 +1221,14 @@ void setup()
     RUN_TEST(test_directed_hop_tracks_three_total_attempts);
     RUN_TEST(test_intermediate_three_attempts_preserve_record_and_flood_last);
     RUN_TEST(test_early_flood_preserves_fresh_verified_route);
+    RUN_TEST(test_max_retransmit_nak_that_stops_entry_is_safe);
+    RUN_TEST(test_retry_whose_send_stops_entry_is_safe);
 
     printf("\n=== rebroadcast of NODENUM_BROADCAST_NO_LORA ===\n");
     RUN_TEST(test_rebroadcast_normal_broadcast_is_relayed);
     RUN_TEST(test_rebroadcast_no_lora_broadcast_is_not_relayed);
     RUN_TEST(test_rebroadcast_declined_send_releases_packet);
+    RUN_TEST(test_opaque_relay_clears_our_next_hop);
     RUN_TEST(test_send_rejects_payload_larger_than_radio_buffer);
 #if USERPREFS_EVENT_MODE
     RUN_TEST(test_event_mode_hop_behavior);
