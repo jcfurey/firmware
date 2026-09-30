@@ -112,6 +112,11 @@ static std::atomic<bool> pendingStartAdvertising{false};
 // up-to-20s wait, so a read arriving mid-teardown can't pin the NimBLE task and stall the disconnect.
 static std::atomic<bool> bleDraining{false};
 
+// Set by onDisconnect so runOnce closes the PhoneAPI session on the main task. PhoneAPI is main-task only;
+// closing it from the NimBLE callback raced getFromRadio() (double release of packetForPhone) and the
+// fromNumChanged observer list the main loop iterates.
+static std::atomic<bool> pendingSessionClose{false};
+
 static void clearPairingDisplay()
 {
     if (!passkeyShowing) {
@@ -220,6 +225,9 @@ class BluetoothPhoneAPI : public PhoneAPI, public concurrency::OSThread
   protected:
     virtual int32_t runOnce() override
     {
+        // First, and before draining fromPhoneQueue, so a reconnecting client's want_config lands on a closed session.
+        closeSessionIfDisconnected();
+
         // Service a deferred advertising restart from onDisconnect, gated on ble_hs_synced() so we
         // never re-enter the GAP API while the host is still mid-reset.
         if (pendingStartAdvertising) {
@@ -257,10 +265,22 @@ class BluetoothPhoneAPI : public PhoneAPI, public concurrency::OSThread
 
             // RADIO -> PHONE:
             runOnceHandleToPhoneQueue(); // push data from getFromRadio to onRead
+
+            closeSessionIfDisconnected();
         }
 
         // the run is triggered via NimbleBluetoothToRadioCallback and NimbleBluetoothFromRadioCallback
         return INT32_MAX;
+    }
+
+    void closeSessionIfDisconnected()
+    {
+        if (!pendingSessionClose.exchange(false))
+            return;
+        close();
+        // getFromRadio() may have queued old-session packets after onDisconnect emptied the queue.
+        std::lock_guard<std::mutex> guard(toPhoneMutex);
+        toPhoneQueueSize = 0;
     }
 
     virtual void onConfigStart() override
@@ -709,14 +729,11 @@ class NimbleBluetoothSecurityCallback : public BLESecurityCallbacks
     }
 };
 
-// Reset per-session PhoneAPI and transport state. Runs from onDisconnect, and again from
-// setupService() on BLE re-enable because deinit()'s bounded disconnect wait can expire
-// before the disconnect event delivers this cleanup (leaving stale queues/state behind).
-static void resetBleSessionState()
+// Reset the transport queues, counters and connection handle. Safe from either task: the queues are
+// mutex-guarded and the counters atomic. PhoneAPI itself is not touched here.
+static void resetBleTransportState()
 {
     if (bluetoothPhoneAPI) {
-        bluetoothPhoneAPI->close();
-
         { // scope for fromPhoneMutex mutex
             std::lock_guard<std::mutex> guard(bluetoothPhoneAPI->fromPhoneMutex);
             bluetoothPhoneAPI->fromPhoneQueueSize = 0;
@@ -736,6 +753,17 @@ static void resetBleSessionState()
     memset(lastToRadio, 0, sizeof(lastToRadio));
 
     nimbleBluetoothConnHandle = BLE_HS_CONN_HANDLE_NONE;
+}
+
+// Reset per-session PhoneAPI and transport state. Main task only. Runs from deinit(), and again from
+// setupService() on BLE re-enable because deinit()'s bounded disconnect wait can expire before the
+// disconnect event delivers its cleanup (leaving stale queues/state behind).
+static void resetBleSessionState()
+{
+    pendingSessionClose = false;
+    if (bluetoothPhoneAPI)
+        bluetoothPhoneAPI->close();
+    resetBleTransportState();
 }
 
 class NimbleBluetoothServerCallback : public BLEServerCallbacks
@@ -780,7 +808,9 @@ class NimbleBluetoothServerCallback : public BLEServerCallbacks
         bluetoothStatus->updateStatus(&newStatus);
         clearPairingDisplay();
 
-        resetBleSessionState();
+        // This runs on the NimBLE task: reset only the transport here and let runOnce close the session.
+        resetBleTransportState();
+        pendingSessionClose = true;
 
         // Defer the advertising restart to runOnce (see pendingStartAdvertising): calling
         // startAdvertising() here would crash if this disconnect was a host reset.

@@ -248,6 +248,9 @@ class PhoneAPI
     /// begin a new connection
     void handleStartConfig();
 
+    /// Record the client's want_config_id nonce, then begin a new connection
+    void handleWantConfig(uint32_t nonce);
+
     enum APIType {
         TYPE_NONE, // Initial state, don't send anything until the client starts asking for config
         TYPE_BLE,

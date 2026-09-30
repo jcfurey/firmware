@@ -265,6 +265,13 @@ PhoneAPI::~PhoneAPI()
 #endif
 }
 
+void PhoneAPI::handleWantConfig(uint32_t nonce)
+{
+    config_nonce = nonce;
+    LOG_INFO("Client wants config, nonce=%u", config_nonce);
+    handleStartConfig();
+}
+
 void PhoneAPI::handleStartConfig()
 {
     // Must be before setting state (because state is how we know !connected)
@@ -465,9 +472,7 @@ bool PhoneAPI::handleToRadio(const uint8_t *buf, size_t bufLength)
 #endif
             return handleToRadioPacket(toRadioScratch.packet);
         case meshtastic_ToRadio_want_config_id_tag:
-            config_nonce = toRadioScratch.want_config_id;
-            LOG_INFO("Client wants config, nonce=%u", config_nonce);
-            handleStartConfig();
+            handleWantConfig(toRadioScratch.want_config_id);
             break;
         case meshtastic_ToRadio_disconnect_tag:
             LOG_INFO("Disconnect from phone");

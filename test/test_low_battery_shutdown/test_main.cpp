@@ -1,11 +1,12 @@
-// Unit tests for updateLowVoltageCounter() in src/Power.cpp - the gate on the low-battery deep sleep.
+// Unit tests for updateLowVoltageCounter() in src/Power.cpp - the gate on the low-battery deep sleep -
+// and for lowBatteryDeepSleepMs() in src/sleep.cpp, which sets how long that sleep lasts.
 //
-// Power::readPowerStatus() calls this once per Power thread cycle (20s) with the freshly probed
-// battery state. When it returns true the device takes EVENT_LOW_BATTERY -> stateLowBattSDS ->
-// doDeepSleep(config.power.sds_secs), and sds_secs defaults to UINT32_MAX, so a false positive parks
-// a node for the ~24.8-day clamp with only RST or a power cycle to recover it. That asymmetry is why
-// the counter has to be conservative: a missed shutdown costs a flat battery, a spurious one costs
-// the whole node.
+// Power::readPowerStatus() calls updateLowVoltageCounter() once per Power thread cycle (20s) with the
+// freshly probed battery state. When it returns true the device takes EVENT_LOW_BATTERY ->
+// stateLowBattSDS -> doDeepSleep(lowBatteryDeepSleepMs()), and sds_secs defaults to "forever", so a
+// false positive parks a node until it is charged, reset or power cycled. That asymmetry is why the
+// counter has to be conservative: a missed shutdown costs a flat battery, a spurious one costs the
+// whole node.
 //
 // The contract is that only *consecutive* confirmed-low readings count. The regression guarded is
 // the original shape, where the reset lived inside the "battery present and not on USB" guard rather
@@ -19,6 +20,8 @@
 // those boards would have discharged to destruction instead of shutting down.
 #include "Arduino.h"
 #include "TestUtil.h"
+#include "mesh/NodeDB.h"
+#include "sleep.h"
 #include <cstdint>
 #include <unity.h>
 
@@ -129,6 +132,26 @@ void test_the_counter_saturates_rather_than_wrapping(void)
     TEST_ASSERT_EQUAL_UINT8(UINT8_MAX, counter);
 }
 
+// lowBatteryDeepSleepMs(): "forever" (sds_secs UINT32_MAX, the client default) turns into a real
+// power-off only on boards that can wake themselves once charged - a power chip, or nRF52 with a
+// battery-rise wake. Native has neither, which is the case pinned here: such a board must keep a
+// timed wake, or an unattended solar node would never retry. The regression guarded on this path is
+// sds_secs == 0 ("use the default"), which fell back to the 1 h broadcast interval instead of the
+// sleep default, so a flat node woke hourly to re-check a battery that had not recovered.
+void test_low_battery_sleep_without_self_wake_stays_timed(void)
+{
+    config.device.role = meshtastic_Config_DeviceConfig_Role_CLIENT;
+
+    config.power.sds_secs = UINT32_MAX;
+    TEST_ASSERT_EQUAL_UINT32(INT32_MAX, lowBatteryDeepSleepMs());
+
+    config.power.sds_secs = 0;
+    TEST_ASSERT_EQUAL_UINT32(INT32_MAX, lowBatteryDeepSleepMs());
+
+    config.power.sds_secs = 600;
+    TEST_ASSERT_EQUAL_UINT32(600 * 1000, lowBatteryDeepSleepMs());
+}
+
 void setup()
 {
     initializeTestEnvironment();
@@ -140,6 +163,7 @@ void setup()
     RUN_TEST(test_the_cutoff_is_exclusive);
     RUN_TEST(test_the_cutoff_is_a_pack_voltage);
     RUN_TEST(test_the_counter_saturates_rather_than_wrapping);
+    RUN_TEST(test_low_battery_sleep_without_self_wake_stays_timed);
     exit(UNITY_END());
 }
 
