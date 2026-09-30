@@ -223,6 +223,37 @@ static void waitEnterSleep(bool skipPreflight, bool deepSleep)
     setBluetoothEnable(false); // has to be off before calling light sleep
 }
 
+#if defined(ARCH_NRF52) && defined(BATTERY_LPCOMP_INPUT)
+bool variant_enableBatteryLpcompWake();
+#endif
+
+// Can a full power-off end on its own once the battery is charged? A power chip restarts on charger
+// insert, and nRF52 System OFF can arm a battery-rise (LPCOMP) wake.
+static bool canWakeFromPowerOffOnCharge()
+{
+#ifdef HAS_PPM
+    if (PPM)
+        return true;
+#endif
+#ifdef HAS_PMU
+    if (pmu_found && PMU)
+        return true;
+#endif
+#if defined(ARCH_NRF52) && defined(BATTERY_LPCOMP_INPUT)
+    return variant_enableBatteryLpcompWake();
+#else
+    return false;
+#endif
+}
+
+uint32_t lowBatteryDeepSleepMs()
+{
+    const uint32_t secs = Default::getConfiguredOrDefault(config.power.sds_secs, default_sds_secs);
+    if (secs == UINT32_MAX && canWakeFromPowerOffOnCharge())
+        return portMAX_DELAY;
+    return Default::getConfiguredOrDefaultMs(secs, default_sds_secs);
+}
+
 void doDeepSleep(uint32_t msecToWake, bool skipPreflight = false, bool skipSaveNodeDb = false)
 {
     if (INCLUDE_vTaskSuspend && (msecToWake == portMAX_DELAY)) {

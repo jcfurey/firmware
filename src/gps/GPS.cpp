@@ -2383,7 +2383,8 @@ void GPS::enable()
     scheduling.reset();
 
     enabled = true;
-    setInterval(GPS_THREAD_INTERVAL);
+    // From now, not from the last run: after >24.8 days disabled, last_run + interval wraps into the future.
+    setIntervalFromNow(GPS_THREAD_INTERVAL);
 
     scheduling.informSearching();
     setPowerState(GPS_ACTIVE);

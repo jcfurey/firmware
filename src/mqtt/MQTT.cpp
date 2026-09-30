@@ -98,9 +98,22 @@ inline void onReceiveProto(char *topic, byte *payload, size_t length)
     }
 
     const meshtastic_Channel &ch = channels.getByName(e.channel_id);
+    const bool isPkiTopic = strcmp(e.channel_id, "PKI") == 0;
     // Find channel by channel_id and check downlink_enabled
-    if (!(strcmp(e.channel_id, "PKI") == 0 ||
-          (strcmp(e.channel_id, channels.getGlobalId(ch.index)) == 0 && ch.settings.downlink_enabled))) {
+    if (!(isPkiTopic || (strcmp(e.channel_id, channels.getGlobalId(ch.index)) == 0 && ch.settings.downlink_enabled))) {
+        return;
+    }
+    // The router decrypts on whichever channel matches the packet's hash, not the envelope's label, so the
+    // two must agree or a relabelled envelope reaches a channel with downlink off. PKI is ciphertext on hash 0.
+    if (e.packet->which_payload_variant == meshtastic_MeshPacket_encrypted_tag) {
+        const int16_t expectedHash = isPkiTopic ? 0 : channels.getHash(ch.index);
+        if ((int32_t)e.packet->channel != expectedHash) {
+            LOG_INFO("Ignore downlink on %s with channel hash 0x%x", e.channel_id, e.packet->channel);
+            return;
+        }
+    } else if (isPkiTopic && !ch.settings.downlink_enabled) {
+        // A plaintext-broker PKI packet is injected on ch (the primary) below, so it needs that channel's downlink.
+        LOG_INFO("Ignore decoded PKI downlink, primary channel downlink disabled");
         return;
     }
 
@@ -114,7 +127,7 @@ inline void onReceiveProto(char *topic, byte *payload, size_t length)
         }
     }
 
-    if (strcmp(e.channel_id, "PKI") == 0 && !anyChannelHasDownlink) {
+    if (isPkiTopic && !anyChannelHasDownlink) {
         return;
     }
     // Generate node ID from nodenum for comparison
@@ -190,7 +203,7 @@ inline void onReceiveProto(char *topic, byte *payload, size_t length)
     }
 
     // PKI messages get accepted even if we can't decrypt
-    if (router && p->which_payload_variant == meshtastic_MeshPacket_encrypted_tag && strcmp(e.channel_id, "PKI") == 0) {
+    if (router && p->which_payload_variant == meshtastic_MeshPacket_encrypted_tag && isPkiTopic) {
         const meshtastic_NodeInfoLite *tx = nodeDB->getMeshNode(getFrom(p.get()));
         const meshtastic_NodeInfoLite *rx = nodeDB->getMeshNode(p->to);
         // Only accept PKI messages to us, or if we have both the sender and receiver in our nodeDB, as then it's

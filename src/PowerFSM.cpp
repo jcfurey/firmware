@@ -98,7 +98,7 @@ static void sdsEnter()
 static void lowBattSDSEnter()
 {
     LOG_POWERFSM("State: Lower batt SDS");
-    doDeepSleep(Default::getConfiguredOrDefaultMs(config.power.sds_secs), false, true);
+    doDeepSleep(lowBatteryDeepSleepMs(), false, true);
 }
 extern Power *power;
 

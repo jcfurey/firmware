@@ -17,6 +17,7 @@
 #include <HTTPMultipartBodyParser.hpp>
 #include <HTTPURLEncodedBodyParser.hpp>
 #include <cmath>
+#include <functional>
 #include <sstream>
 
 #ifdef ARCH_ESP32
@@ -64,8 +65,17 @@ char const *contentTypes[][2] = {{".txt", "text/plain"},     {".html", "text/htm
 // Our API to handle messages to and from the radio.
 HttpAPI webAPI;
 
+static void markRequestActivity(HTTPRequest *, HTTPResponse *, std::function<void()> next)
+{
+    if (webServerThread)
+        webServerThread->markActivity();
+    next();
+}
+
 void registerHandlers(HTTPServer *insecureServer, HTTPSServer *secureServer)
 {
+    insecureServer->addMiddleware(&markRequestActivity);
+    secureServer->addMiddleware(&markRequestActivity);
 
     // For every resource available on the server, we need to create a ResourceNode
     // The ResourceNode links URL and HTTP method to a handler function
@@ -120,9 +130,6 @@ void registerHandlers(HTTPServer *insecureServer, HTTPSServer *secureServer)
 
 void handleAPIv1FromRadio(HTTPRequest *req, HTTPResponse *res)
 {
-    if (webServerThread)
-        webServerThread->markActivity();
-
     LOG_DEBUG("webAPI handleAPIv1FromRadio");
 
     /*
@@ -386,27 +393,27 @@ void handleFsDeleteStatic(HTTPRequest *req, HTTPResponse *res)
     res->setHeader("Access-Control-Allow-Origin", "*");
     res->setHeader("Access-Control-Allow-Methods", "DELETE");
 
-    if (params->getQueryParameter("delete", paramValDelete)) {
-        std::string pathDelete = "/" + paramValDelete;
-        bool removed;
-        {
-            concurrency::LockGuard g(spiLock);
-            removed = FSCom.remove(pathDelete.c_str());
-        }
-        LOG_INFO("%s", pathDelete.c_str());
-        std::string out = "{\"status\":";
-        out += jsonEscape(removed ? "ok" : "Error");
-        out += "}";
-        writeAll(res, out);
+    const std::string pathDelete = params->getQueryParameter("delete", paramValDelete) ? "/" + paramValDelete : "";
+    if (!isStaticFilePath(pathDelete)) {
+        res->setStatusCode(400);
+        res->setStatusText("Bad Request");
+        writeAll(res, "{\"status\":\"Error\"}");
         return;
     }
+    bool removed;
+    {
+        concurrency::LockGuard g(spiLock);
+        removed = FSCom.remove(pathDelete.c_str());
+    }
+    LOG_INFO("%s", pathDelete.c_str());
+    std::string out = "{\"status\":";
+    out += jsonEscape(removed ? "ok" : "Error");
+    out += "}";
+    writeAll(res, out);
 }
 
 void handleStatic(HTTPRequest *req, HTTPResponse *res)
 {
-    if (webServerThread)
-        webServerThread->markActivity();
-
     // Get access to the parameters
     ResourceParameters *params = req->getParams();
 
@@ -425,6 +432,12 @@ void handleStatic(HTTPRequest *req, HTTPResponse *res)
         if (filename == "/static/") {
             filename = "/static/index.html";
             filenameGzip = "/static/index.html.gz";
+        }
+
+        if (!isStaticFilePath(filename)) {
+            res->setStatusCode(400);
+            res->setStatusText("Bad Request");
+            return;
         }
 
         // spiLock covers filesystem calls only: a socket write or a syslog line can need the lock itself on a
@@ -538,9 +551,6 @@ void handleFormUpload(HTTPRequest *req, HTTPResponse *res)
         return;
     }
 
-    res->println("<html><head><meta http-equiv=\"refresh\" content=\"1;url=/static\" /><title>File "
-                 "Upload</title></head><body><h1>File Upload</h1>");
-
     // We iterate over the fields. Any field with a filename is uploaded.
     // Note that the BodyParser consumes the request body, meaning that you can iterate over the request's
     // fields only a single time. The reason for this is that it allows you to handle large requests
@@ -578,9 +588,15 @@ void handleFormUpload(HTTPRequest *req, HTTPResponse *res)
             return;
         }
 
-        // You should check file name validity and all that, but we skip that to make the core
-        // concepts of the body parser functionality easier to understand.
         std::string pathname = "/static/" + filename;
+        if (!isStaticFilePath(pathname)) {
+            res->setStatusCode(400);
+            res->setStatusText("Bad Request");
+            return;
+        }
+        if (!didwrite)
+            res->println("<html><head><meta http-equiv=\"refresh\" content=\"1;url=/static\" /><title>File "
+                         "Upload</title></head><body><h1>File Upload</h1>");
 
         // spiLock covers filesystem calls only: the body is read from a socket, and on a shared-bus Ethernet board
         // the receive path needs the lock. Free space is taken once, as nothing else writes while this runs.
@@ -879,7 +895,8 @@ void handleRestart(HTTPRequest *req, HTTPResponse *res)
     res->println("Restarting");
 
     LOG_DEBUG("Restarted on HTTP(s) Request");
-    webServerThread->requestRestart = (millis() / 1000) + 5;
+    if (webServerThread)
+        webServerThread->scheduleRestart();
 }
 
 void handleScanNetworks(HTTPRequest *req, HTTPResponse *res)

@@ -53,12 +53,6 @@ Preferences prefs;
 using namespace httpsserver;
 #include "mesh/http/ContentHandler.h"
 
-static const uint32_t ACTIVE_THRESHOLD_MS = 5000;
-static const uint32_t MEDIUM_THRESHOLD_MS = 30000;
-static const int32_t ACTIVE_INTERVAL_MS = 50;
-static const int32_t MEDIUM_INTERVAL_MS = 200;
-static const int32_t IDLE_INTERVAL_MS = 1000;
-
 // Maximum concurrent HTTPS connections (reduced from default 4 to save memory)
 static const uint8_t MAX_HTTPS_CONNECTIONS = 2;
 
@@ -170,9 +164,12 @@ static void handleWebResponse()
         if (isWebServerReady) {
             // Check heap before HTTPS processing - SSL requires significant memory
             if (secureServer) {
+                const bool hasPendingConnection = secureServer->hasPendingConnection();
+                if (hasPendingConnection && webServerThread)
+                    webServerThread->markActivity();
                 // Reap first so the probe sees the heap a finished session just returned. Nowhere to put
                 // a connection, or nobody knocking: either way the probe would buy nothing.
-                if (!secureServer->reapClosedConnections() || !secureServer->hasPendingConnection()) {
+                if (!secureServer->reapClosedConnections() || !hasPendingConnection) {
                     secureServer->serviceExistingConnections();
                 } else {
                     const TlsHeapVerdict verdict = judgeTlsSessionHeap();
@@ -297,23 +294,21 @@ WebServerThread::WebServerThread() : concurrency::OSThread("WebServer")
     if (!config.network.wifi_enabled && !config.network.eth_enabled) {
         disable();
     }
-    lastActivityTime = Time::getMillis();
 }
 
 void WebServerThread::markActivity()
 {
-    lastActivityTime = Time::getMillis();
+    timing.markActivity();
+}
+
+void WebServerThread::scheduleRestart()
+{
+    timing.scheduleRestart();
 }
 
 int32_t WebServerThread::getAdaptiveInterval()
 {
-    if (Throttle::isWithinTimespanMs(lastActivityTime, ACTIVE_THRESHOLD_MS)) {
-        return ACTIVE_INTERVAL_MS;
-    } else if (Throttle::isWithinTimespanMs(lastActivityTime, MEDIUM_THRESHOLD_MS)) {
-        return MEDIUM_INTERVAL_MS;
-    } else {
-        return IDLE_INTERVAL_MS;
-    }
+    return timing.getPollingInterval();
 }
 
 int32_t WebServerThread::runOnce()
@@ -324,7 +319,7 @@ int32_t WebServerThread::runOnce()
 
     handleWebResponse();
 
-    if (requestRestart && (millis() / 1000) > requestRestart) {
+    if (timing.shouldRestart()) {
         ESP.restart();
     }
 

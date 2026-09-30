@@ -1164,6 +1164,97 @@ void test_receiveDropsCaseMismatchedChannelName(void)
     TEST_ASSERT_TRUE(mockRouter->packets_.empty());
 }
 
+// onReceiveProto() checks downlink_enabled against the channel the envelope names, but the router
+// decrypts an encrypted packet on whichever channel matches its hash byte. So anyone on the broker
+// could take ciphertext uplinked from a channel with downlink off, relabel the envelope with the name
+// of a downlink-enabled channel, and have it decrypted and rebroadcast on the disabled one. An
+// encrypted envelope's hash must match the channel it names, and PKI ciphertext must carry hash 0.
+static void addPrivateChannelWithoutDownlink()
+{
+    channelFile.channels[1] = meshtastic_Channel{
+        .index = 1,
+        .has_settings = true,
+        .settings = {.name = "private", .uplink_enabled = true, .downlink_enabled = false},
+        .role = meshtastic_Channel_Role_SECONDARY,
+    };
+    channelFile.channels[1].settings.psk.size = 32;
+    memset(channelFile.channels[1].settings.psk.bytes, 0xab, 32);
+    channelFile.channels_count = 2;
+    channels.onConfigChanged();
+}
+
+// Real ciphertext for channel index chIndex, so the router's decrypt either succeeds or it doesn't.
+static meshtastic_MeshPacket encryptOnChannel(ChannelIndex chIndex)
+{
+    meshtastic_MeshPacket p = meshtastic_MeshPacket_init_zero;
+    p.from = 1;
+    p.to = NODENUM_BROADCAST;
+    p.id = 0x5100;
+    p.channel = chIndex;
+    p.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+    p.decoded.portnum = meshtastic_PortNum_TEXT_MESSAGE_APP;
+    p.decoded.payload.size = 5;
+    memcpy(p.decoded.payload.bytes, "hello", 5);
+    TEST_ASSERT_EQUAL(meshtastic_Routing_Error_NONE, perhapsEncode(&p));
+    TEST_ASSERT_EQUAL(meshtastic_MeshPacket_encrypted_tag, p.which_payload_variant);
+    return p;
+}
+
+// Control for the case below: ciphertext for the downlink-enabled channel, labelled as that channel,
+// is decrypted and delivered - so an empty router queue in the next test is the gate, not the crypto.
+void test_receiveAcceptsEncryptedMatchingChannelHash(void)
+{
+    addPrivateChannelWithoutDownlink();
+    meshtastic_MeshPacket p = encryptOnChannel(0);
+
+    unitTest->publish(&p, "!87654321", "test");
+
+    TEST_ASSERT_EQUAL(1, mockRouter->packets_.size());
+}
+
+void test_receiveDropsEncryptedRelabelledFromDownlinkDisabledChannel(void)
+{
+    addPrivateChannelWithoutDownlink();
+    meshtastic_MeshPacket p = encryptOnChannel(1);
+
+    unitTest->publish(&p, "!87654321", "test");
+
+    TEST_ASSERT_TRUE(mockRouter->packets_.empty());
+}
+
+void test_receiveDropsPkiTopicWithChannelHash(void)
+{
+    meshtastic_MeshPacket e = encrypted;
+    e.to = myNodeInfo.my_node_num;
+    e.channel = channels.getHash(0);
+    TEST_ASSERT_NOT_EQUAL(0, e.channel);
+
+    unitTest->publish(&e, "!87654321", "PKI");
+
+    TEST_ASSERT_TRUE(mockRouter->packets_.empty());
+}
+
+// A decoded (plaintext-broker) PKI envelope is injected on the primary channel, so it needs the
+// primary's downlink; a downlink-enabled secondary alone used to be enough.
+void test_receiveDropsDecodedPkiWhenPrimaryDownlinkDisabled(void)
+{
+    channelFile.channels[0].settings.downlink_enabled = false;
+    channelFile.channels[1] = meshtastic_Channel{
+        .index = 1,
+        .has_settings = true,
+        .settings = {.name = "second", .downlink_enabled = true},
+        .role = meshtastic_Channel_Role_SECONDARY,
+    };
+    channelFile.channels_count = 2;
+    channels.onConfigChanged();
+    meshtastic_MeshPacket d = decoded;
+    d.to = myNodeInfo.my_node_num;
+
+    unitTest->publish(&d, "!87654321", "PKI");
+
+    TEST_ASSERT_TRUE(mockRouter->packets_.empty());
+}
+
 // A validly-decoding envelope missing channel_id is rejected before any gate runs.
 void test_receiveRejectsEnvelopeWithoutChannelId(void)
 {
@@ -1617,6 +1708,10 @@ void setup()
     RUN_TEST(test_receiveDropsPkiNotToUsWithOnlySenderKnown);
     RUN_TEST(test_receiveDropsUnknownChannelName);
     RUN_TEST(test_receiveDropsCaseMismatchedChannelName);
+    RUN_TEST(test_receiveAcceptsEncryptedMatchingChannelHash);
+    RUN_TEST(test_receiveDropsEncryptedRelabelledFromDownlinkDisabledChannel);
+    RUN_TEST(test_receiveDropsPkiTopicWithChannelHash);
+    RUN_TEST(test_receiveDropsDecodedPkiWhenPrimaryDownlinkDisabled);
     RUN_TEST(test_receiveRejectsEnvelopeWithoutChannelId);
     RUN_TEST(test_receiveRejectsTruncatedEnvelope);
     RUN_TEST(test_receiveFuzzServiceEnvelope);

@@ -85,6 +85,12 @@ static bool licensedIdentityWillMigrate()
 }
 #endif
 
+/// True for a node number that can name another node: not 0, not broadcast, not us.
+static bool isPeerNodeNum(NodeNum num)
+{
+    return num != 0 && num != NODENUM_BROADCAST && num != nodeDB->getNodeNum();
+}
+
 /// A special reserved string to indicate strings we can not share with external nodes.  We will use this 'reserved' word instead.
 /// Also, to make setting work correctly, if someone tries to set a string to this reserved value we assume they don't really want
 /// a change.
@@ -507,6 +513,11 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
     }
     case meshtastic_AdminMessage_remove_by_nodenum_tag: {
         LOG_INFO("Client got remove_nodenum");
+        // Removing our own row breaks every path that assumes self sits at index 0 (asserts on next phone sync).
+        if (!isPeerNodeNum(r->remove_by_nodenum)) {
+            LOG_WARN("Refuse remove_nodenum for 0x%08x: not a peer", r->remove_by_nodenum);
+            break;
+        }
         nodeDB->removeNodeByNum(r->remove_by_nodenum);
         break;
     }
@@ -547,6 +558,10 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
         // Unlike the sibling node-targeted admin commands, create the entry if
         // it's absent so the block sticks for a node we've not heard from yet
         // (e.g. one a remote admin asks us to block) with no NodeInfo or key.
+        if (!isPeerNodeNum(r->set_ignored_node)) {
+            LOG_WARN("Refuse set_ignored_node for 0x%08x: not a peer", r->set_ignored_node);
+            break;
+        }
         meshtastic_NodeInfoLite *node = nodeDB->getOrCreateMeshNode(r->set_ignored_node);
         if (node != NULL) {
             if (nodeDB->setProtectedFlag(node, NODEINFO_BITFIELD_IS_IGNORED_MASK, true)) {

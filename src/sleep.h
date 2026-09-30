@@ -21,6 +21,10 @@ extern XPowersLibInterface *PMU;
 // Perform power on init that we do on each wake from deep sleep
 void initDeepSleep();
 
+/// Deep-sleep length for a critically low battery. The "forever" sds_secs becomes a real power-off
+/// (portMAX_DELAY) only where the board can wake itself once charged; elsewhere it stays a timed wake.
+uint32_t lowBatteryDeepSleepMs();
+
 void setCPUFast(bool on);
 
 /** return true if sleep is allowed right now

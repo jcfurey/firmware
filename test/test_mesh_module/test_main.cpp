@@ -560,6 +560,20 @@ static void test_dispatch_noResponderSendsNak()
     TEST_ASSERT_EQUAL_HEX32(REMOTE_NODE, mockRoutingModule->ackNaks[0].to);
 }
 
+// MeshModule::callModules() treats broadcasts as "to us", and its NO_RESPONSE branch used to fire for
+// them too: one broadcast with want_response on a port nobody answers drew a NAK from every node that
+// heard it, each flooded back to the sender - an N-fold amplifier any node could trigger. Only a
+// request addressed to us may be NAKed.
+static void test_dispatch_broadcastWithNoResponderIsNotNaked()
+{
+    meshtastic_MeshPacket request = makeRequest(meshtastic_PortNum_TELEMETRY_APP);
+    request.to = NODENUM_BROADCAST;
+    MeshModule::callModules(request);
+
+    TEST_ASSERT_EQUAL_UINT32(0, mockRouter->sentPackets.size());
+    TEST_ASSERT_EQUAL_UINT32(0, mockRoutingModule->ackNaks.size());
+}
+
 static void test_dispatch_ignoreRequestIsClearedPerPacket()
 {
     auto *ignoring = registerDispatchModule(new ReplyIgnoreModule());
@@ -894,6 +908,7 @@ void setup()
     RUN_TEST(test_dispatch_crossPortReplyUsesRequestOwner);
     RUN_TEST(test_dispatch_foreignPortObserverCanSuppressNak);
     RUN_TEST(test_dispatch_noResponderSendsNak);
+    RUN_TEST(test_dispatch_broadcastWithNoResponderIsNotNaked);
     RUN_TEST(test_dispatch_ignoreRequestIsClearedPerPacket);
     RUN_TEST(test_dispatch_realNeighborInfoCannotShadowTelemetryOwner);
     RUN_TEST(test_localReplyToSelf_isDeliveredToPhone);

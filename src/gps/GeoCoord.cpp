@@ -276,11 +276,10 @@ void GeoCoord::latLongToOSGR(const double lat, const double lon, OSGR &osgr)
     double v = a * f0 / sqrt(1 - e2 * sin(phi) * sin(phi));
     double rho = a * f0 * (1 - e2) / pow(1 - e2 * sin(phi) * sin(phi), 1.5);
     double eta2 = v / rho - 1;
-    double mA = (1 + n + (5 / 4) * n * n + (5 / 4) * n * n * n) * (phi - phi0);
-    double mB = (3 * n + 3 * n * n + (21 / 8) * n * n * n) * sin(phi - phi0) * cos(phi + phi0);
-    // loss of precision in mC & mD due to floating point rounding can cause inaccuracy of northing by a few meters
-    double mC = (15 / 8 * n * n + 15 / 8 * n * n * n) * sin(2 * (phi - phi0)) * cos(2 * (phi + phi0));
-    double mD = (35 / 24) * n * n * n * sin(3 * (phi - phi0)) * cos(3 * (phi + phi0));
+    double mA = (1 + n + (5.0 / 4) * n * n + (5.0 / 4) * n * n * n) * (phi - phi0);
+    double mB = (3 * n + 3 * n * n + (21.0 / 8) * n * n * n) * sin(phi - phi0) * cos(phi + phi0);
+    double mC = (15.0 / 8 * n * n + 15.0 / 8 * n * n * n) * sin(2 * (phi - phi0)) * cos(2 * (phi + phi0));
+    double mD = (35.0 / 24) * n * n * n * sin(3 * (phi - phi0)) * cos(3 * (phi + phi0));
     double m = b * f0 * (mA - mB + mC - mD);
 
     double cos3Phi = cos(phi) * cos(phi) * cos(phi);

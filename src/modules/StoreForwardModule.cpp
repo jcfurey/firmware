@@ -631,7 +631,10 @@ StoreForwardModule::StoreForwardModule()
 
                     // Popupate PSRAM with our data structures.
                     this->populatePSRAM();
-                    is_server = true;
+                    // A records count larger than free PSRAM fails the allocation; historyAdd() would then write through null.
+                    is_server = (this->packetHistory != nullptr);
+                    if (!is_server)
+                        LOG_ERROR("S&F: can't allocate %u history records, Disable", this->records);
                 } else {
                     LOG_INFO(".");
                     LOG_INFO("S&F: not enough PSRAM free, Disable");

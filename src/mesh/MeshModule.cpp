@@ -165,7 +165,8 @@ void MeshModule::callModules(meshtastic_MeshPacket &mp, RxSource src)
                 // no one should have already replied!
                 assert(!currentReply);
 
-                if (isDecoded && mp.decoded.want_response) {
+                // Only a request addressed to us earns an error reply; answering a broadcast would make every node reply.
+                if (isDecoded && mp.decoded.want_response && isToUs(&mp)) {
                     printPacket("packet on wrong channel, returning error", &mp);
                     currentReply = pi.allocErrorResponse(meshtastic_Routing_Error_NOT_AUTHORIZED, &mp);
                 } else
@@ -217,9 +218,9 @@ void MeshModule::callModules(meshtastic_MeshPacket &mp, RxSource src)
             printPacket("Send response", currentReply);
             service->sendToMesh(currentReply);
             currentReply = NULL;
-        } else if (mp.from != ourNodeNum && !ignoreRequest) {
+        } else if (mp.from != ourNodeNum && !ignoreRequest && isToUs(&mp)) {
             // Note: if the message started with the local node or a module asked to ignore the request, we don't want to send a
-            // no response reply
+            // no response reply. Nor for a broadcast: every node that heard it would NAK the sender.
 
             // No one wanted to reply to this request, tell the requster that happened
             LOG_DEBUG("No one responded, send a nak");
